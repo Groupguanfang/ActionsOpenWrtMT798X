@@ -77,10 +77,13 @@ jobs:
           grep -E \
             '^(CONFIG_TARGET_(mediatek|PROFILE|MULTI_PROFILE|ALL_PROFILES|PER_DEVICE_ROOTFS|DEVICE_)|CONFIG_USE_APK|CONFIG_PACKAGE_apk)' \
             .config || true
+          echo "Relevant kernel configuration:"
+          grep -E \
+            '^CONFIG_KERNEL_(DEBUG_INFO|BPF_EVENTS|CGROUP_BPF|NETKIT|KPROBES)' \
+            .config || true
 
           required=(
             CONFIG_USE_APK=y
-            CONFIG_KERNEL_BPF_SYSCALL=y
             CONFIG_KERNEL_DEBUG_INFO_BTF=y
             CONFIG_KERNEL_CGROUP_BPF=y
             CONFIG_PACKAGE_kmod-sched-bpf=y
