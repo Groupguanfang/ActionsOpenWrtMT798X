@@ -204,24 +204,34 @@ jobs:
           SYSUPGRADE=$(find "$TARGET_DIR" -maxdepth 1 \
             -name '*clx_s20l*squashfs-sysupgrade.bin' -print -quit)
           MANIFEST=$(find "$TARGET_DIR" -maxdepth 1 \
-            -name '*clx_s20l*.manifest' -print -quit)
+            -name '*mediatek-filogic.manifest' -print -quit)
           PROFILES=$(find "$TARGET_DIR" -maxdepth 1 -name 'profiles.json' -print -quit)
           KERNEL_CONFIG=$(find build_dir -type f \
             -path '*/linux-mediatek_filogic/linux-*/.config' -print -quit)
 
-          test -n "$SYSUPGRADE"
-          test -s "$SYSUPGRADE"
-          test -n "$MANIFEST"
-          test -n "$PROFILES"
-          test -n "$KERNEL_CONFIG"
-
           OUT="$GITHUB_WORKSPACE/out"
           mkdir -p "$OUT"
-          cp "$SYSUPGRADE" "$OUT/"
-          cp "$MANIFEST" "$OUT/"
-          cp "$PROFILES" "$OUT/"
-          cp "$KERNEL_CONFIG" "$OUT/kernel.config"
           cp .config "$OUT/build.config"
+
+          failed=0
+          copy_artifact() {
+            local source="$1"
+            local destination="$2"
+            local label="$3"
+            if [ -n "$source" ] && [ -s "$source" ]; then
+              cp "$source" "$destination"
+              echo "OK: collected $label"
+            else
+              echo "ERROR: missing $label"
+              failed=1
+            fi
+          }
+
+          copy_artifact "$SYSUPGRADE" "$OUT/" "sysupgrade image"
+          copy_artifact "$MANIFEST" "$OUT/" "package manifest"
+          copy_artifact "$PROFILES" "$OUT/" "profiles.json"
+          copy_artifact "$KERNEL_CONFIG" "$OUT/kernel.config" "kernel configuration"
+
           (
             cd "$OUT"
             sha256sum ./* > SHA256SUMS
@@ -237,14 +247,15 @@ jobs:
           } > "$OUT/BUILD-INFO.txt"
 
           echo "SYSUpgrade artifact: $SYSUPGRADE"
-          echo "SIZE=$(stat -c %s "$OUT/$(basename "$SYSUPGRADE")")" >> "$GITHUB_OUTPUT"
+          if [ -n "$SYSUPGRADE" ] && [ -s "$SYSUPGRADE" ]; then
+            echo "SIZE=$(stat -c %s "$OUT/$(basename "$SYSUPGRADE")")" >> "$GITHUB_OUTPUT"
+          fi
 
-          failed=0
           check_grep() {
             local pattern="$1"
             local file="$2"
             local label="$3"
-            if grep -q "$pattern" "$file"; then
+            if [ -s "$file" ] && grep -q "$pattern" "$file"; then
               echo "OK: $label"
             else
               echo "ERROR: $label"
@@ -255,19 +266,19 @@ jobs:
           }
 
           echo "Kernel config: $KERNEL_CONFIG"
-          check_grep '^CONFIG_DEBUG_INFO_BTF=y$' "$KERNEL_CONFIG" "kernel BTF"
-          check_grep '^CONFIG_VETH=m$' "$KERNEL_CONFIG" "kernel veth"
-          check_grep '^CONFIG_VHOST_NET=m$' "$KERNEL_CONFIG" "kernel vhost-net"
-          check_grep '^CONFIG_NET_CLS_BPF=m$' "$KERNEL_CONFIG" "kernel cls_bpf"
-          check_grep '^CONFIG_NET_ACT_BPF=m$' "$KERNEL_CONFIG" "kernel act_bpf"
-          check_grep '^CONFIG_NFNETLINK_QUEUE=m$' "$KERNEL_CONFIG" "kernel nfnetlink queue"
+          check_grep '^CONFIG_DEBUG_INFO_BTF=y$' "$OUT/kernel.config" "kernel BTF"
+          check_grep '^CONFIG_VETH=m$' "$OUT/kernel.config" "kernel veth"
+          check_grep '^CONFIG_VHOST_NET=m$' "$OUT/kernel.config" "kernel vhost-net"
+          check_grep '^CONFIG_NET_CLS_BPF=m$' "$OUT/kernel.config" "kernel cls_bpf"
+          check_grep '^CONFIG_NET_ACT_BPF=m$' "$OUT/kernel.config" "kernel act_bpf"
+          check_grep '^CONFIG_NFNETLINK_QUEUE=m$' "$OUT/kernel.config" "kernel nfnetlink queue"
 
           echo "Manifest: $MANIFEST"
-          check_grep '"id": "clx_s20l"' "$PROFILES" "S20L profile"
-          check_grep '^apk-openssl - ' "$MANIFEST" "APK package manager"
-          check_grep '^kmod-veth - ' "$MANIFEST" "kmod-veth package"
-          check_grep '^kmod-nft-queue - ' "$MANIFEST" "kmod-nft-queue package"
-          check_grep '^kmod-nfnetlink-queue - ' "$MANIFEST" "kmod-nfnetlink-queue package"
+          check_grep '"id": "clx_s20l"' "$OUT/profiles.json" "S20L profile"
+          check_grep '^apk-openssl - ' "$OUT/$(basename "$MANIFEST")" "APK package manager"
+          check_grep '^kmod-veth - ' "$OUT/$(basename "$MANIFEST")" "kmod-veth package"
+          check_grep '^kmod-nft-queue - ' "$OUT/$(basename "$MANIFEST")" "kmod-nft-queue package"
+          check_grep '^kmod-nfnetlink-queue - ' "$OUT/$(basename "$MANIFEST")" "kmod-nfnetlink-queue package"
 
           if [ "$failed" -ne 0 ]; then
             echo "Validation failed, but artifacts were preserved for inspection."
