@@ -63,9 +63,9 @@ jobs:
       - name: Apply S20L compatibility and APK feed overlay
         working-directory: /workdir/openwrt
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           chmod +x "$GITHUB_WORKSPACE/25.12/s20l-honk-apk-patch.sh"
-          OPENWRT_DIR="$PWD" "$GITHUB_WORKSPACE/25.12/s20l-honk-apk-patch.sh"
+          OPENWRT_DIR="$PWD" bash -x "$GITHUB_WORKSPACE/25.12/s20l-honk-apk-patch.sh"
           cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
           make defconfig
 

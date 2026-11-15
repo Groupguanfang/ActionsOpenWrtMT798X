@@ -8,8 +8,14 @@ REPO_DIR="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel)}"
 DTS="$OPENWRT_DIR/target/linux/mediatek/dts-ext/mt7986a-clx-s20l.dts"
 IMAGE_MK="$OPENWRT_DIR/target/linux/mediatek/image/filogic-ext.mk"
 
-test -f "$DTS"
-test -f "$IMAGE_MK"
+[ -f "$DTS" ] || {
+    echo "ERROR: missing DTS: $DTS" >&2
+    exit 1
+}
+[ -f "$IMAGE_MK" ] || {
+    echo "ERROR: missing image Makefile: $IMAGE_MK" >&2
+    exit 1
+}
 
 # The vendor firmware identifies this board as supergateway,s20l, while the
 # 25.12 source uses clx,s20l. Keep both identities so sysupgrade accepts the
@@ -79,6 +85,9 @@ fi
 
 # Keep the existing LAN address stable. The upstream S20L scripts in this
 # repository change it to 192.168.2.1; this build intentionally avoids that.
-grep -q 'config_generate' "$OPENWRT_DIR/package/base-files/files/bin/config_generate"
+grep -q 'config_generate' "$OPENWRT_DIR/package/base-files/files/bin/config_generate" || {
+    echo "ERROR: package/base-files config_generate is missing or changed" >&2
+    exit 1
+}
 
 echo "S20L compatibility and APK feed patches applied."
