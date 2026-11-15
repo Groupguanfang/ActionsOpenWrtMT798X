@@ -203,6 +203,8 @@ jobs:
           TARGET_DIR="bin/targets/mediatek/filogic"
           SYSUPGRADE=$(find "$TARGET_DIR" -maxdepth 1 \
             -name '*clx_s20l*squashfs-sysupgrade.bin' -print -quit)
+          INITRAMFS=$(find "$TARGET_DIR" -maxdepth 1 \
+            -name '*clx_s20l*initramfs-kernel.bin' -print -quit)
           MANIFEST=$(find "$TARGET_DIR" -maxdepth 1 \
             -name '*mediatek-filogic.manifest' -print -quit)
           PROFILES=$(find "$TARGET_DIR" -maxdepth 1 -name 'profiles.json' -print -quit)
@@ -228,6 +230,7 @@ jobs:
           }
 
           copy_artifact "$SYSUPGRADE" "$OUT/" "sysupgrade image"
+          copy_artifact "$INITRAMFS" "$OUT/" "initramfs recovery image"
           copy_artifact "$MANIFEST" "$OUT/" "package manifest"
           copy_artifact "$PROFILES" "$OUT/" "profiles.json"
           copy_artifact "$KERNEL_CONFIG" "$OUT/kernel.config" "kernel configuration"
@@ -271,14 +274,25 @@ jobs:
           check_grep '^CONFIG_VHOST_NET=m$' "$OUT/kernel.config" "kernel vhost-net"
           check_grep '^CONFIG_NET_CLS_BPF=m$' "$OUT/kernel.config" "kernel cls_bpf"
           check_grep '^CONFIG_NET_ACT_BPF=m$' "$OUT/kernel.config" "kernel act_bpf"
-          check_grep '^CONFIG_NFNETLINK_QUEUE=m$' "$OUT/kernel.config" "kernel nfnetlink queue"
+          check_grep '^CONFIG_NETFILTER_NETLINK_QUEUE=m$' "$OUT/kernel.config" "kernel nfnetlink queue"
 
           echo "Manifest: $MANIFEST"
-          check_grep '"id": "clx_s20l"' "$OUT/profiles.json" "S20L profile"
+          check_grep '"clx_s20l"' "$OUT/profiles.json" "S20L profile"
           check_grep '^apk-openssl - ' "$OUT/$(basename "$MANIFEST")" "APK package manager"
           check_grep '^kmod-veth - ' "$OUT/$(basename "$MANIFEST")" "kmod-veth package"
           check_grep '^kmod-nft-queue - ' "$OUT/$(basename "$MANIFEST")" "kmod-nft-queue package"
           check_grep '^kmod-nfnetlink-queue - ' "$OUT/$(basename "$MANIFEST")" "kmod-nfnetlink-queue package"
+
+          CONTROL=$(tar tf "$SYSUPGRADE" 2>/dev/null | \
+            grep -E '^sysupgrade-(supergateway_s20l|supergateway,s20l)/CONTROL$' | \
+            head -1 || true)
+          if [ -n "$CONTROL" ] && tar xOf "$SYSUPGRADE" "$CONTROL" | \
+              grep -qx 'BOARD=supergateway,s20l'; then
+            echo "OK: sysupgrade board identity"
+          else
+            echo "ERROR: sysupgrade board identity is not supergateway,s20l"
+            failed=1
+          fi
 
           if [ "$failed" -ne 0 ]; then
             echo "Validation failed, but artifacts were preserved for inspection."

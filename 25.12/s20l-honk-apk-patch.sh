@@ -50,6 +50,7 @@ replacement = """define Device/clx_s20l
   $(call Device/clx_s20-common)
   DEVICE_MODEL := S20L
   DEVICE_DTS := mt7986a-clx-s20l
+  BOARD_NAME := supergateway,s20l
   SUPPORTED_DEVICES += supergateway,s20l clx,s20l
 endef
 """
