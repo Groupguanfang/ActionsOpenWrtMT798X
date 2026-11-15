@@ -1,0 +1,272 @@
+name: Build ImmortalWrt S20L APK Honk
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  SOURCE_REPO: https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git
+  SOURCE_BRANCH: "25.12"
+  CONFIG_FILE: 25.12/s20l-apk-honk.config
+  TZ: Asia/Shanghai
+  CCACHE_DIR: /workdir/ccache
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Initialize build host
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache clang dwarves file flex bison \
+            gawk gcc-multilib g++-multilib gettext git libelf-dev \
+            libncurses-dev libssl-dev python3 python3-setuptools \
+            rsync unzip wget xz-utils zlib1g-dev zstd
+
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+
+          sudo mkdir -p /workdir
+          sudo chown "$USER":"$USER" /workdir
+          mkdir -p "$CCACHE_DIR"
+
+      - name: Clone ImmortalWrt source
+        run: |
+          set -euo pipefail
+          git clone --single-branch --branch "$SOURCE_BRANCH" \
+            --depth=1 "$SOURCE_REPO" /workdir/openwrt
+          ln -s /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
+
+      - name: Update and install feeds
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply S20L compatibility and APK feed overlay
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          chmod +x "$GITHUB_WORKSPACE/25.12/s20l-honk-apk-patch.sh"
+          OPENWRT_DIR="$PWD" "$GITHUB_WORKSPACE/25.12/s20l-honk-apk-patch.sh"
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
+          make defconfig
+
+      - name: Validate target and Honk kernel capabilities
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          required=(
+            CONFIG_TARGET_mediatek_filogic_DEVICE_clx_s20l=y
+            CONFIG_USE_APK=y
+            CONFIG_KERNEL_BPF_SYSCALL=y
+            CONFIG_KERNEL_DEBUG_INFO_BTF=y
+            CONFIG_KERNEL_CGROUP_BPF=y
+            CONFIG_PACKAGE_kmod-sched-bpf=y
+            CONFIG_PACKAGE_kmod-veth=y
+            CONFIG_PACKAGE_kmod-vhost=y
+            CONFIG_PACKAGE_kmod-vhost-net=y
+            CONFIG_PACKAGE_kmod-tun=y
+            CONFIG_PACKAGE_kmod-nft-queue=y
+            CONFIG_PACKAGE_kmod-nfnetlink-queue=y
+            CONFIG_PACKAGE_kmod-ipt-ipset=y
+            CONFIG_PACKAGE_kmod-ipt-tproxy=y
+            CONFIG_PACKAGE_iptables-zz-legacy=y
+            CONFIG_PACKAGE_iptables-mod-nfqueue=y
+          )
+
+          for item in "${required[@]}"; do
+            grep -qx "$item" .config || {
+              echo "ERROR: missing config: $item"
+              exit 1
+            }
+          done
+
+          grep -q 'supergateway,s20l' target/linux/mediatek/dts-ext/mt7986a-clx-s20l.dts
+          grep -q 'SUPPORTED_DEVICES += supergateway,s20l clx,s20l' \
+            target/linux/mediatek/image/filogic-ext.mk
+          echo "Target and package validation passed."
+          grep -E \
+            '^(CONFIG_TARGET_mediatek_filogic_DEVICE_clx_s20l|CONFIG_USE_APK|CONFIG_KERNEL_DEBUG_INFO_BTF|CONFIG_PACKAGE_kmod-(veth|vhost|vhost-net|sched-bpf|nft-queue|nfnetlink-queue))=' \
+            .config
+
+      - name: Compute toolchain cache key
+        id: cache-key
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          TOOLS_HASH=$(find tools toolchain -type f \
+            \( -name Makefile -o -name '*.mk' \) -exec md5sum {} + \
+            2>/dev/null | sort | md5sum | cut -d' ' -f1)
+          CACHE_KEY="toolchain-mediatek-filogic-${TOOLS_HASH:0:16}"
+          echo "CACHE_KEY=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+          echo "Toolchain cache key: $CACHE_KEY"
+
+      - name: Restore toolchain from GitHub cache
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /workdir/openwrt/staging_dir/host
+            /workdir/openwrt/staging_dir/hostpkg
+            /workdir/openwrt/staging_dir/toolchain-*
+          key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+
+      - name: Fall back to upstream public toolchain cache
+        id: upstream-toolchain
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          ASSET_NAME="${{ steps.cache-key.outputs.CACHE_KEY }}.tzst"
+          if gh release download toolchain-cache \
+              --repo jameslau-tech/ActionsOpenWrtMT798X \
+              --pattern "$ASSET_NAME" --dir /tmp 2>/dev/null; then
+            echo "Restoring public upstream toolchain: $ASSET_NAME"
+            tar -I unzstd -xf "/tmp/$ASSET_NAME"
+            echo "restored=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No matching upstream toolchain cache; it will be compiled."
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build missing tools and toolchain
+        if: steps.toolchain-cache.outputs.cache-hit != 'true' && steps.upstream-toolchain.outputs.restored != 'true'
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          make tools/install -j"$(nproc)"
+          make toolchain/install -j"$(nproc)"
+
+      - name: Restore source archive cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /workdir/openwrt/dl
+          key: s20l-dl-${{ hashFiles('25.12/s20l-apk-honk.config', '25.12/s20l-honk-apk-patch.sh') }}
+
+      - name: Download source archives
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          make download -j"$(nproc)" || make download -j1 V=s
+
+      - name: Build firmware
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" V=s || {
+            echo "Parallel build failed; resuming with four jobs."
+            free -h
+            make -j4 V=s
+          }
+
+      - name: Collect and validate artifacts
+        id: artifacts
+        working-directory: /workdir/openwrt
+        run: |
+          set -euo pipefail
+          TARGET_DIR="bin/targets/mediatek/filogic"
+          SYSUPGRADE=$(find "$TARGET_DIR" -maxdepth 1 \
+            -name '*clx_s20l*squashfs-sysupgrade.bin' -print -quit)
+          MANIFEST=$(find "$TARGET_DIR" -maxdepth 1 \
+            -name '*clx_s20l*.manifest' -print -quit)
+          PROFILES=$(find "$TARGET_DIR" -maxdepth 1 -name 'profiles.json' -print -quit)
+          KERNEL_CONFIG=$(find build_dir -path '*/linux-*/.config' -print -quit)
+
+          test -n "$SYSUPGRADE"
+          test -s "$SYSUPGRADE"
+          test -n "$MANIFEST"
+          test -n "$PROFILES"
+          test -n "$KERNEL_CONFIG"
+
+          grep -q 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
+          grep -q 'CONFIG_VETH=m' "$KERNEL_CONFIG"
+          grep -q 'CONFIG_VHOST_NET=m' "$KERNEL_CONFIG"
+          grep -q 'CONFIG_NET_CLS_BPF=m' "$KERNEL_CONFIG"
+          grep -q 'CONFIG_NET_ACT_BPF=m' "$KERNEL_CONFIG"
+          grep -q 'CONFIG_NFNETLINK_QUEUE=m' "$KERNEL_CONFIG"
+
+          grep -q '"id": "clx_s20l"' "$PROFILES"
+          grep -Eq '^apk(-| )' "$MANIFEST"
+          grep -q '^kmod-veth ' "$MANIFEST"
+          grep -q '^kmod-nft-queue ' "$MANIFEST"
+          grep -q '^kmod-nfnetlink-queue ' "$MANIFEST"
+
+          OUT="$GITHUB_WORKSPACE/out"
+          mkdir -p "$OUT"
+          cp "$SYSUPGRADE" "$OUT/"
+          cp "$MANIFEST" "$OUT/"
+          cp "$PROFILES" "$OUT/"
+          cp "$KERNEL_CONFIG" "$OUT/kernel.config"
+          cp .config "$OUT/build.config"
+          (
+            cd "$OUT"
+            sha256sum ./* > SHA256SUMS
+          )
+          {
+            echo "Source: $SOURCE_REPO ($SOURCE_BRANCH)"
+            echo "Source commit: $(git rev-parse HEAD)"
+            echo "Board identity: supergateway,s20l + clx,s20l"
+            echo "Package manager: APK"
+            echo "Honk prerequisites: BTF + TC/eBPF + veth/vhost + NFQUEUE"
+            echo "UA3F prerequisites: legacy xtables + TPROXY + NFQUEUE + ipset"
+            echo "Build date: $(date -Iseconds)"
+          } > "$OUT/BUILD-INFO.txt"
+
+          echo "SYSUpgrade artifact: $SYSUPGRADE"
+          echo "SIZE=$(stat -c %s "$OUT/$(basename "$SYSUPGRADE")")" >> "$GITHUB_OUTPUT"
+
+      - name: Save toolchain cache
+        if: success() && steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /workdir/openwrt/staging_dir/host
+            /workdir/openwrt/staging_dir/hostpkg
+            /workdir/openwrt/staging_dir/toolchain-*
+          key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+
+      - name: Save source archive cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: /workdir/openwrt/dl
+          key: s20l-dl-${{ hashFiles('25.12/s20l-apk-honk.config', '25.12/s20l-honk-apk-patch.sh') }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-s20l-apk-honk
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="s20l-apk-honk-$(date -u +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" out/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes "ImmortalWrt 25.12 APK build for Super Gateway S20L with Honk and UA3F kernel prerequisites."
