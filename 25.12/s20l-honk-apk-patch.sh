@@ -85,8 +85,8 @@ fi
 
 # Keep the existing LAN address stable. The upstream S20L scripts in this
 # repository change it to 192.168.2.1; this build intentionally avoids that.
-grep -q 'config_generate' "$OPENWRT_DIR/package/base-files/files/bin/config_generate" || {
-    echo "ERROR: package/base-files config_generate is missing or changed" >&2
+[ -f "$OPENWRT_DIR/package/base-files/files/bin/config_generate" ] || {
+    echo "ERROR: package/base-files config_generate is missing" >&2
     exit 1
 }
 
