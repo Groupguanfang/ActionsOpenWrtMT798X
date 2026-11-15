@@ -184,6 +184,7 @@ jobs:
           make download -j"$(nproc)" || make download -j1 V=s
 
       - name: Build firmware
+        id: build
         working-directory: /workdir/openwrt
         run: |
           set -euo pipefail
@@ -192,6 +193,7 @@ jobs:
             free -h
             make -j4 V=s
           }
+          echo "success=true" >> "$GITHUB_OUTPUT"
 
       - name: Collect and validate artifacts
         id: artifacts
@@ -204,26 +206,14 @@ jobs:
           MANIFEST=$(find "$TARGET_DIR" -maxdepth 1 \
             -name '*clx_s20l*.manifest' -print -quit)
           PROFILES=$(find "$TARGET_DIR" -maxdepth 1 -name 'profiles.json' -print -quit)
-          KERNEL_CONFIG=$(find build_dir -path '*/linux-*/.config' -print -quit)
+          KERNEL_CONFIG=$(find build_dir -type f \
+            -path '*/linux-mediatek_filogic/linux-*/.config' -print -quit)
 
           test -n "$SYSUPGRADE"
           test -s "$SYSUPGRADE"
           test -n "$MANIFEST"
           test -n "$PROFILES"
           test -n "$KERNEL_CONFIG"
-
-          grep -q 'CONFIG_DEBUG_INFO_BTF=y' "$KERNEL_CONFIG"
-          grep -q 'CONFIG_VETH=m' "$KERNEL_CONFIG"
-          grep -q 'CONFIG_VHOST_NET=m' "$KERNEL_CONFIG"
-          grep -q 'CONFIG_NET_CLS_BPF=m' "$KERNEL_CONFIG"
-          grep -q 'CONFIG_NET_ACT_BPF=m' "$KERNEL_CONFIG"
-          grep -q 'CONFIG_NFNETLINK_QUEUE=m' "$KERNEL_CONFIG"
-
-          grep -q '"id": "clx_s20l"' "$PROFILES"
-          grep -Eq '^apk(-| )' "$MANIFEST"
-          grep -q '^kmod-veth ' "$MANIFEST"
-          grep -q '^kmod-nft-queue ' "$MANIFEST"
-          grep -q '^kmod-nfnetlink-queue ' "$MANIFEST"
 
           OUT="$GITHUB_WORKSPACE/out"
           mkdir -p "$OUT"
@@ -249,8 +239,43 @@ jobs:
           echo "SYSUpgrade artifact: $SYSUPGRADE"
           echo "SIZE=$(stat -c %s "$OUT/$(basename "$SYSUPGRADE")")" >> "$GITHUB_OUTPUT"
 
+          failed=0
+          check_grep() {
+            local pattern="$1"
+            local file="$2"
+            local label="$3"
+            if grep -q "$pattern" "$file"; then
+              echo "OK: $label"
+            else
+              echo "ERROR: $label"
+              echo "  missing pattern: $pattern"
+              echo "  in: $file"
+              failed=1
+            fi
+          }
+
+          echo "Kernel config: $KERNEL_CONFIG"
+          check_grep '^CONFIG_DEBUG_INFO_BTF=y$' "$KERNEL_CONFIG" "kernel BTF"
+          check_grep '^CONFIG_VETH=m$' "$KERNEL_CONFIG" "kernel veth"
+          check_grep '^CONFIG_VHOST_NET=m$' "$KERNEL_CONFIG" "kernel vhost-net"
+          check_grep '^CONFIG_NET_CLS_BPF=m$' "$KERNEL_CONFIG" "kernel cls_bpf"
+          check_grep '^CONFIG_NET_ACT_BPF=m$' "$KERNEL_CONFIG" "kernel act_bpf"
+          check_grep '^CONFIG_NFNETLINK_QUEUE=m$' "$KERNEL_CONFIG" "kernel nfnetlink queue"
+
+          echo "Manifest: $MANIFEST"
+          check_grep '"id": "clx_s20l"' "$PROFILES" "S20L profile"
+          check_grep '^apk-openssl - ' "$MANIFEST" "APK package manager"
+          check_grep '^kmod-veth - ' "$MANIFEST" "kmod-veth package"
+          check_grep '^kmod-nft-queue - ' "$MANIFEST" "kmod-nft-queue package"
+          check_grep '^kmod-nfnetlink-queue - ' "$MANIFEST" "kmod-nfnetlink-queue package"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "Validation failed, but artifacts were preserved for inspection."
+            exit 1
+          fi
+
       - name: Save toolchain cache
-        if: success() && steps.toolchain-cache.outputs.cache-hit != 'true'
+        if: always() && steps.build.outputs.success == 'true' && steps.toolchain-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -260,13 +285,14 @@ jobs:
           key: ${{ steps.cache-key.outputs.CACHE_KEY }}
 
       - name: Save source archive cache
-        if: success()
+        if: always() && steps.build.outputs.success == 'true'
         uses: actions/cache/save@v4
         with:
           path: /workdir/openwrt/dl
           key: s20l-dl-${{ hashFiles('25.12/s20l-apk-honk.config', '25.12/s20l-honk-apk-patch.sh') }}
 
       - name: Upload workflow artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-s20l-apk-honk
